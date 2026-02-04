@@ -1,0 +1,6 @@
+[submodule "zlib"]
+	path = zlib
+	url = https://github.com/madler/zlib
+[submodule "Qt-Advanced-Docking-System"]
+	path = Qt-Advanced-Docking-System
+	url = https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System
