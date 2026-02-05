@@ -56,7 +56,8 @@ MainWindow::MainWindow(QWidget *parent)
     m_functionsTable->setSelectionMode(QAbstractItemView::SingleSelection);
     m_functionsTable->setHorizontalHeaderLabels({ tr("Module"), tr("Name"), tr("Offset"), tr("Local"), tr("Collision"), tr("Signature") });
     m_functionsTable->horizontalHeader()->setStretchLastSection(true);
-    m_functionsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    m_functionsTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
+    m_functionsTable->setSortingEnabled(true);
     funcGroupLayout->addWidget(m_functionsTable);
     funcLayout->addWidget(funcGroup);
     ads::CDockWidget *functionsDock = m_dockManager->createDockWidget(tr("Functions"));
@@ -129,19 +130,28 @@ void MainWindow::refreshLibraryInfo()
 void MainWindow::refreshFunctionsTable()
 {
     QTableWidget *t = m_functionsTable;
+    t->setSortingEnabled(false);
     t->setRowCount(0);
-    if (!m_result.success) return;
+    if (!m_result.success) {
+        t->setSortingEnabled(true);
+        return;
+    }
     QVector<SigParser::FlirtResult::FunctionEntry> entries = m_result.allFunctions();
     t->setRowCount(entries.size());
     for (int row = 0; row < entries.size(); ++row) {
         const auto &e = entries[row];
-        t->setItem(row, 0, new QTableWidgetItem(QString::number(e.moduleIndex)));
-        t->setItem(row, 1, new QTableWidgetItem(e.function->name));
-        t->setItem(row, 2, new QTableWidgetItem(QString("0x%1").arg(e.function->offset, 0, 16)));
-        t->setItem(row, 3, new QTableWidgetItem(e.function->isLocal ? "Y" : ""));
-        t->setItem(row, 4, new QTableWidgetItem(e.function->isCollision ? "!" : ""));
-        t->setItem(row, 5, new QTableWidgetItem(e.module->patternPathHex()));
+        auto setReadOnly = [t](int r, int c, QTableWidgetItem *item) {
+            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+            t->setItem(r, c, item);
+        };
+        setReadOnly(row, 0, new QTableWidgetItem(QString::number(e.moduleIndex)));
+        setReadOnly(row, 1, new QTableWidgetItem(e.function->name));
+        setReadOnly(row, 2, new QTableWidgetItem(QString("0x%1").arg(e.function->offset, 0, 16)));
+        setReadOnly(row, 3, new QTableWidgetItem(e.function->isLocal ? "Y" : ""));
+        setReadOnly(row, 4, new QTableWidgetItem(e.function->isCollision ? "!" : ""));
+        setReadOnly(row, 5, new QTableWidgetItem(e.module->patternPathHex()));
     }
+    t->setSortingEnabled(true);
     applyTableFilter();
 }
 
