@@ -144,7 +144,9 @@ void MainWindow::refreshFunctionsTable()
             item->setFlags(item->flags() & ~Qt::ItemIsEditable);
             t->setItem(r, c, item);
         };
-        setReadOnly(row, 0, new QTableWidgetItem(QString::number(e.moduleIndex)));
+        QTableWidgetItem *moduleItem = new QTableWidgetItem(QString::number(e.moduleIndex));
+        moduleItem->setData(Qt::UserRole, row);
+        setReadOnly(row, 0, moduleItem);
         setReadOnly(row, 1, new QTableWidgetItem(e.function->name));
         setReadOnly(row, 2, new QTableWidgetItem(QString("0x%1").arg(e.function->offset, 0, 16)));
         setReadOnly(row, 3, new QTableWidgetItem(e.function->isLocal ? "Y" : ""));
@@ -184,15 +186,28 @@ void MainWindow::onSearchTextChanged(const QString &)
 void MainWindow::refreshRulesForSelection()
 {
     int row = m_functionsTable->currentRow();
-    if (row < 0 || !m_result.success || row >= m_result.allFunctions().size()) {
+    if (row < 0 || !m_result.success) {
+        m_rulesText->setPlainText(QString());
+        m_rulesText->setPlaceholderText("Select a function or module to view rules");
+        return;
+    }
+    QTableWidgetItem *item = m_functionsTable->item(row, 0);
+    if (!item) {
+        m_rulesText->setPlainText(QString());
+        m_rulesText->setPlaceholderText("Select a function or module to view rules");
+        return;
+    }
+    int originalIndex = item->data(Qt::UserRole).toInt();
+    QVector<SigParser::FlirtResult::FunctionEntry> entries = m_result.allFunctions();
+    if (originalIndex < 0 || originalIndex >= entries.size()) {
         m_rulesText->setPlainText(QString());
         m_rulesText->setPlaceholderText("Select a function or module to view rules");
         return;
     }
     m_rulesText->setPlaceholderText(QString());
-    QVector<SigParser::FlirtResult::FunctionEntry> entries = m_result.allFunctions();
-    const auto &e = entries[row];
+    const auto &e = entries[originalIndex];
     QStringList lines;
+    lines << "Function: " + e.function->name;
     lines << "Pattern path: " + e.module->patternPathHex();
     lines << e.module->rulesSummary();
     m_rulesText->setPlainText(lines.join("\n\n"));
