@@ -28,6 +28,7 @@ else()
     )
     set(BUILD_SHARED_LIBS OFF)
     set(SKIP_INSTALL_ALL ON)
+    set(ZLIB_BUILD_EXAMPLES OFF CACHE BOOL "Build zlib examples" FORCE)
     FetchContent_MakeAvailable(zlib)
     set(ZLIB_TARGET zlibstatic)  # fetched zlib creates this target
     set(ZLIB_FOUND TRUE)
@@ -97,4 +98,17 @@ install(TARGETS SigViewer
 
 if(QT_VERSION_MAJOR EQUAL 6)
     qt_finalize_executable(SigViewer)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(flirtparser_test
+        tests/flirtparser_test.cpp
+        sigparser/flirtparser.cpp
+        sigparser/flirtparser.h
+    )
+    target_include_directories(flirtparser_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(flirtparser_test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${ZLIB_TARGET})
+    target_compile_definitions(flirtparser_test PRIVATE HAVE_ZLIB=1)
+    add_test(NAME flirtparser_regression COMMAND flirtparser_test)
 endif()

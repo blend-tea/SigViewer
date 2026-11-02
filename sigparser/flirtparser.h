@@ -16,7 +16,9 @@ constexpr uint8_t IDASIG_PARSE_MORE_MODULES_WITH_SAME_CRC = 0x08;
 constexpr uint8_t IDASIG_PARSE_MORE_MODULES = 0x10;
 constexpr uint8_t IDASIG_FUNCTION_LOCAL = 0x02;
 constexpr uint8_t IDASIG_FUNCTION_UNRESOLVED_COLLISION = 0x08;
-constexpr int FLIRT_NAME_MAX = 1024;
+// Go signatures contain names longer than radare2's historical 1024-byte limit.
+// Use angr's 4096-byte bound, rejecting overlong names instead of losing alignment.
+constexpr int FLIRT_NAME_MAX = 4096;
 
 struct FlirtFunction {
     QString name;
@@ -68,7 +70,7 @@ struct FlirtHeader {
     quint8 libraryNameLen = 0;
     quint16 ctypesCrc16 = 0;
     quint32 nFunctions = 0;   // v6/v7
-    quint16 patternSize = 0;  // v8/v9
+    quint16 patternSize = 32; // implicit before v8; explicitly stored in v8+
     quint16 unknownV10 = 0;    // v10
 };
 
@@ -94,6 +96,7 @@ struct ParseState {
     int version = 0;
     bool eof = false;
     bool err = false;
+    QString errorMessage;
 };
 
 class FlirtParser

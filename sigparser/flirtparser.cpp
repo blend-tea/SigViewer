@@ -1,6 +1,14 @@
 #include "flirtparser.h"
 #include <QDataStream>
 #include <QBuffer>
+#include <limits>
+#include <QtEndian>
+
+// Format references (not copied implementations):
+// angr 6afa0c79a83d9f677a46b0275cdb63bf16c1979e, angr/analyses/flirt/{flirt_sig,consts}.py
+// radare2 1ec2a778f4765e678ae65779108d9a2237e02a58, libr/anal/flirt.c
+// https://github.com/angr/angr
+// https://github.com/radareorg/radare2
 #if HAVE_ZLIB
 #include <zlib.h>
 #endif
@@ -11,6 +19,8 @@ namespace SigParser {
 // Decompress deflate/zlib/gzip stream. windowBits: -15 raw deflate, 15 zlib, 15+16 gzip
 static QByteArray decompressZlib(const QByteArray &compressed, int windowBits) {
     const int CHUNK = 65536;
+    if (static_cast<quint64>(compressed.size()) > std::numeric_limits<uInt>::max())
+        return QByteArray();
     z_stream strm = {};
     if (inflateInit2(&strm, windowBits) != Z_OK)
         return QByteArray();
@@ -18,25 +28,41 @@ static QByteArray decompressZlib(const QByteArray &compressed, int windowBits) {
     strm.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(compressed.constData()));
     QByteArray out;
     QByteArray buf(CHUNK, 0);
-    int ret;
-    do {
+    // Bound expansion of untrusted input (also applies to external gzip files).
+    constexpr qsizetype MAX_DECOMPRESSED_SIZE = 256 * 1024 * 1024;
+    for (;;) {
         strm.avail_out = CHUNK;
         strm.next_out = reinterpret_cast<Bytef *>(buf.data());
-        ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret != Z_OK && ret != Z_STREAM_END && ret != Z_BUF_ERROR) {
+        const uInt previousInput = strm.avail_in;
+        const int ret = inflate(&strm, Z_NO_FLUSH);
+        const int produced = CHUNK - strm.avail_out;
+        if ((ret != Z_OK && ret != Z_STREAM_END) ||
+            out.size() > MAX_DECOMPRESSED_SIZE - produced ||
+            (ret != Z_STREAM_END && produced == 0 && strm.avail_in == previousInput)) {
             inflateEnd(&strm);
             return QByteArray();
         }
-        out.append(buf.constData(), CHUNK - strm.avail_out);
-    } while (ret != Z_STREAM_END && strm.avail_out == 0);
-    inflateEnd(&strm);
-    return out;
+        out.append(buf.constData(), produced);
+        if (ret == Z_STREAM_END) {
+            inflateEnd(&strm);
+            return out;
+        }
+    }
 }
 #endif
 
+static bool parseError(ParseState &st, const QString &message) {
+    st.err = true;
+    if (st.errorMessage.isEmpty())
+        st.errorMessage = QString("%1 at body offset %2").arg(message).arg(st.pos);
+    return false;
+}
+
 static quint8 readByte(ParseState &st) {
-    if (st.eof || st.err || st.pos >= st.body.size()) {
-        st.eof = (st.pos >= st.body.size());
+    if (st.eof || st.err) return 0;
+    if (st.pos >= st.body.size()) {
+        st.eof = true;
+        parseError(st, "Unexpected EOF");
         return 0;
     }
     return static_cast<quint8>(st.body[st.pos++]);
@@ -101,13 +127,14 @@ QString FlirtModule::rulesSummary() const {
         QStringList t;
         for (const auto &tb : tailBytes)
             t << QString("(%1: %2)").arg(tb.offset, 4, 16).arg(tb.value, 2, 16, QChar('0'));
-        parts << "Tail bytes: " + t.join(" ");
+        parts << "Tail bytes (relative to end of CRC region): " + t.join(" ");
     }
     if (!referencedFunctions.isEmpty()) {
         QStringList r;
         for (const auto &rf : referencedFunctions)
-            r << QString("%1: %2").arg(rf.offset, 4, 16).arg(rf.name);
-        parts << "REF " + r.join(" ");
+            r << QString("%1%2: %3").arg(rf.negativeOffset ? "-" : "")
+                     .arg(rf.offset, 4, 16, QChar('0')).arg(rf.name);
+        parts << "REF (relative to function start) " + r.join(" ");
     }
     return parts.join("\n");
 }
@@ -160,7 +187,7 @@ bool FlirtParser::parseHeader(ParseState &st, FlirtResult &result) {
     FlirtHeader &h = result.header;
     h.version = st.version;
     h.arch = readByte(st);
-    h.fileTypes = static_cast<quint8>(st.body[st.pos]) | (static_cast<quint8>(st.body[st.pos+1])<<8) | (static_cast<quint8>(st.body[st.pos+2])<<16) | (static_cast<quint8>(st.body[st.pos+3])<<24);
+    h.fileTypes = qFromLittleEndian<quint32>(st.body.constData() + st.pos);
     st.pos += 4;
     h.osTypes = static_cast<quint8>(st.body[st.pos]) | (static_cast<quint8>(st.body[st.pos+1])<<8);
     st.pos += 2;
@@ -180,15 +207,15 @@ bool FlirtParser::parseHeader(ParseState &st, FlirtResult &result) {
 
     if (st.version >= 6) {
         if (st.pos + 4 > st.body.size()) { result.errorMessage = "Truncated v6/v7 header"; return false; }
-        h.nFunctions = static_cast<quint8>(st.body[st.pos]) | (static_cast<quint8>(st.body[st.pos+1])<<8) | (static_cast<quint8>(st.body[st.pos+2])<<16) | (static_cast<quint8>(st.body[st.pos+3])<<24);
+        h.nFunctions = qFromLittleEndian<quint32>(st.body.constData() + st.pos);
         st.pos += 4;
         if (st.version >= 8) {
             if (st.pos + 2 > st.body.size()) { result.errorMessage = "Truncated v8/v9 header"; return false; }
-            h.patternSize = static_cast<quint8>(st.body[st.pos])<<8 | static_cast<quint8>(st.body[st.pos+1]);
+            h.patternSize = static_cast<quint8>(st.body[st.pos]) | (static_cast<quint8>(st.body[st.pos+1]) << 8);
             st.pos += 2;
             if (st.version >= 10) {
                 if (st.pos + 2 > st.body.size()) { result.errorMessage = "Truncated v10 header"; return false; }
-                h.unknownV10 = static_cast<quint8>(st.body[st.pos])<<8 | static_cast<quint8>(st.body[st.pos+1]);
+                h.unknownV10 = static_cast<quint8>(st.body[st.pos]) | (static_cast<quint8>(st.body[st.pos+1]) << 8);
                 st.pos += 2;
             }
         }
@@ -223,7 +250,7 @@ quint32 FlirtParser::readMultipleBytes(ParseState &st) {
 bool FlirtParser::readNodeLength(ParseState &st, quint8 &len) {
     if (st.eof || st.err) return false;
     len = readByte(st);
-    return true;
+    return !st.eof && !st.err;
 }
 
 bool FlirtParser::readNodeVariantMask(ParseState &st, quint8 nodeLen, quint64 &mask) {
@@ -232,18 +259,20 @@ bool FlirtParser::readNodeVariantMask(ParseState &st, quint8 nodeLen, quint64 &m
     } else if (nodeLen <= 32) {
         mask = readMultipleBytes(st);
     } else if (nodeLen <= 64) {
-        mask = (static_cast<quint64>(readMultipleBytes(st)) << 32) | readMultipleBytes(st);
+        const quint32 high = readMultipleBytes(st);
+        const quint32 low = readMultipleBytes(st);
+        mask = (static_cast<quint64>(high) << 32) | low;
     } else {
-        return false;
+        return parseError(st, "Node length exceeds 64 bytes");
     }
     return !st.eof && !st.err;
 }
 
 bool FlirtParser::readNodeBytes(ParseState &st, quint8 nodeLen, quint64 variantMask, FlirtPatternNode &nodeOut) {
-    if (nodeLen > 63 || nodeLen <= 0) return false;
+    if (nodeLen > 64) return parseError(st, "Node length exceeds 64 bytes");
     nodeOut.patternBytes.resize(nodeLen);
     nodeOut.variantMask.resize(nodeLen);
-    quint64 bit = 1ULL << (nodeLen - 1);
+    quint64 bit = nodeLen ? (1ULL << (nodeLen - 1)) : 0;
     for (int i = 0; i < nodeLen; ++i, bit >>= 1) {
         nodeOut.variantMask[i] = (variantMask & bit) ? 1 : 0;
         if (variantMask & bit) {
@@ -251,6 +280,7 @@ bool FlirtParser::readNodeBytes(ParseState &st, quint8 nodeLen, quint64 variantM
         } else {
             if (st.eof || st.err) return false;
             nodeOut.patternBytes[i] = static_cast<char>(readByte(st));
+            if (st.eof || st.err) return false;
         }
     }
     return true;
@@ -259,12 +289,11 @@ bool FlirtParser::readNodeBytes(ParseState &st, quint8 nodeLen, quint64 variantM
 bool FlirtParser::readModulePublicFunctions(ParseState &st, FlirtModule &mod, quint8 &flags) {
     quint32 offset = 0;
     do {
-        if (st.version >= 9) {
-            offset += readMultipleBytes(st);
-        } else {
-            offset += readMax2Bytes(st);
-        }
+        const quint32 delta = st.version >= 9 ? readMultipleBytes(st) : readMax2Bytes(st);
         if (st.eof || st.err) return false;
+        if (delta > std::numeric_limits<quint32>::max() - offset)
+            return parseError(st, "Public function offset overflow");
+        offset += delta;
 
         FlirtFunction f;
         f.offset = offset;
@@ -279,7 +308,9 @@ bool FlirtParser::readModulePublicFunctions(ParseState &st, FlirtModule &mod, qu
         }
 
         QByteArray nameBytes;
-        while (currentByte >= 0x20 && nameBytes.size() < FLIRT_NAME_MAX) {
+        while (currentByte >= 0x20) {
+            if (nameBytes.size() >= FLIRT_NAME_MAX - 1)
+                return parseError(st, "Public function name too long");
             nameBytes.append(static_cast<char>(currentByte));
             currentByte = readByte(st);
             if (st.eof || st.err) return false;
@@ -326,7 +357,10 @@ bool FlirtParser::readModuleReferencedFunctions(ParseState &st, FlirtModule &mod
             nameLen = readMultipleBytes(st);
             if (st.eof || st.err) return false;
         }
-        if (nameLen >= static_cast<quint32>(FLIRT_NAME_MAX)) return false;
+        if (nameLen >= static_cast<quint32>(FLIRT_NAME_MAX))
+            return parseError(st, "Referenced function name too long");
+        if (nameLen > static_cast<quint64>(st.body.size() - st.pos))
+            return parseError(st, "Truncated referenced function name");
         QByteArray nameBytes;
         for (quint32 j = 0; j < nameLen; ++j) {
             nameBytes.append(static_cast<char>(readByte(st)));
@@ -383,9 +417,19 @@ bool FlirtParser::parseTree(ParseState &st, FlirtResult &result, QVector<FlirtPa
     if (treeNodes == 0) {
         return parseLeaf(st, path, modulesOut);
     }
+    // Count zero-length nodes too: they must not permit unbounded recursion.
+    if (path.size() >= 64)
+        return parseError(st, "Signature tree depth exceeds 64");
+    if (treeNodes > static_cast<quint64>(st.body.size() - st.pos))
+        return parseError(st, "Truncated child nodes");
+    int patternLength = 0;
+    for (const auto &node : path) patternLength += node.patternBytes.size();
+    const int maxPatternLength = qMax(64, int(result.header.patternSize));
     for (quint32 i = 0; i < treeNodes; ++i) {
         quint8 nodeLen;
         if (!readNodeLength(st, nodeLen)) return false;
+        if (patternLength + nodeLen > maxPatternLength)
+            return parseError(st, "Signature pattern exceeds allowed length");
         quint64 variantMask;
         if (!readNodeVariantMask(st, nodeLen, variantMask)) return false;
         FlirtPatternNode node;
@@ -434,7 +478,8 @@ FlirtResult FlirtParser::parse(const QByteArray &data) {
 
     QVector<FlirtPatternNode> path;
     if (!parseTree(st, result, path, result.modules)) {
-        if (result.errorMessage.isEmpty()) result.errorMessage = "Parse error in signature tree";
+        if (!st.errorMessage.isEmpty()) result.errorMessage = st.errorMessage;
+        else if (result.errorMessage.isEmpty()) result.errorMessage = "Parse error in signature tree";
         return result;
     }
 
@@ -460,40 +505,60 @@ QString archToString(quint8 arch) {
     }
 }
 
+struct DisplayFlag { quint32 bit; const char *name; };
+
+template<size_t N>
+static QString displayFlags(quint32 value, const DisplayFlag (&flags)[N], int width,
+                            const QString &zero = QString()) {
+    QStringList names;
+    quint32 remaining = value;
+    for (const auto &flag : flags) {
+        if (value & flag.bit) names << QString::fromLatin1(flag.name);
+        remaining &= ~flag.bit;
+    }
+    if (remaining || (names.isEmpty() && zero.isEmpty()))
+        names << QString("0x%1").arg(remaining, width, 16, QChar('0'));
+    if (names.isEmpty()) return zero;
+    return names.join(",");
+}
+
 QString fileTypesToString(quint32 ft) {
-    QStringList s;
-    if (ft & 0x04) s << "BIN";
-    if (ft & 0x400) s << "COFF";
-    if (ft & 0x800) s << "PE";
-    if (ft & 0x4000) s << "ELF";
-    if (s.isEmpty()) s << QString("0x%1").arg(ft, 8, 16);
-    return s.join(",");
+    static const DisplayFlag flags[] = {
+        {0x1, "DOS_EXE_OLD"}, {0x2, "DOS_COM_OLD"}, {0x4, "BIN"},
+        {0x8, "DOSDRV"}, {0x10, "NE"}, {0x20, "INTELHEX"}, {0x40, "MOSHEX"},
+        {0x80, "LX"}, {0x100, "LE"}, {0x200, "NLM"}, {0x400, "COFF"},
+        {0x800, "PE"}, {0x1000, "OMF"}, {0x2000, "SREC"}, {0x4000, "ZIP"},
+        {0x8000, "OMFLIB"}, {0x10000, "AR"}, {0x20000, "LOADER"},
+        {0x40000, "ELF"}, {0x80000, "W32RUN"}, {0x100000, "AOUT"},
+        {0x200000, "PILOT"}, {0x400000, "DOS_EXE"}, {0x800000, "DOS_COM"},
+        {0x1000000, "AIXAR"}
+    };
+    return displayFlags(ft, flags, 8);
 }
 
 QString osTypesToString(quint16 ot) {
-    QStringList s;
-    if (ot & 0x01) s << "MSDOS";
-    if (ot & 0x02) s << "WIN";
-    if (ot & 0x10) s << "UNIX";
-    if (s.isEmpty()) s << QString("0x%1").arg(ot, 4, 16);
-    return s.join(",");
+    static const DisplayFlag flags[] = {
+        {1, "MSDOS"}, {2, "WIN"}, {4, "OS2"}, {8, "NETWARE"},
+        {0x10, "UNIX"}, {0x20, "OTHER"}
+    };
+    return displayFlags(ot, flags, 4);
 }
 
 QString appTypesToString(quint16 at) {
-    QStringList s;
-    if (at & 0x04) s << "EXE";
-    if (at & 0x08) s << "DLL";
-    if (at & 0x100) s << "32_BIT";
-    if (at & 0x200) s << "64_BIT";
-    if (s.isEmpty()) s << QString("0x%1").arg(at, 4, 16);
-    return s.join(",");
+    static const DisplayFlag flags[] = {
+        {1, "CONSOLE"}, {2, "GRAPHICS"}, {4, "EXE"}, {8, "DLL"}, {0x10, "DRV"},
+        {0x20, "SINGLE_THREADED"}, {0x40, "MULTI_THREADED"}, {0x80, "16_BIT"},
+        {0x100, "32_BIT"}, {0x200, "64_BIT"}
+    };
+    return displayFlags(at, flags, 4);
 }
 
 QString featuresToString(quint16 f) {
-    QStringList s;
-    if (f & 0x10) s << "COMPRESSED";
-    if (s.isEmpty()) s << "none";
-    return s.join(",");
+    static const DisplayFlag flags[] = {
+        {1, "STARTUP"}, {2, "CTYPE_CRC"}, {4, "2BYTE_CTYPE"},
+        {8, "ALT_CTYPE_CRC"}, {0x10, "COMPRESSED"}
+    };
+    return displayFlags(f, flags, 4, "none");
 }
 
 QByteArray FlirtParser::decompressGzip(const QByteArray &gzipData) {
