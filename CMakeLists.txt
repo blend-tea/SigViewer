@@ -111,4 +111,12 @@ if(BUILD_TESTING)
     target_link_libraries(flirtparser_test PRIVATE Qt${QT_VERSION_MAJOR}::Core ${ZLIB_TARGET})
     target_compile_definitions(flirtparser_test PRIVATE HAVE_ZLIB=1)
     add_test(NAME flirtparser_regression COMMAND flirtparser_test)
+
+    add_executable(patternwidgets_test tests/patternwidgets_test.cpp
+        patternwidgets.h sigparser/flirtparser.cpp sigparser/flirtparser.h)
+    target_include_directories(patternwidgets_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(patternwidgets_test PRIVATE Qt${QT_VERSION_MAJOR}::Widgets ${ZLIB_TARGET})
+    target_compile_definitions(patternwidgets_test PRIVATE HAVE_ZLIB=1)
+    add_test(NAME patternwidgets_regression COMMAND patternwidgets_test)
+    set_tests_properties(patternwidgets_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()

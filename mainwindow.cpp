@@ -1,4 +1,6 @@
 #include "mainwindow.h"
+#include "patternwidgets.h"
+#include <QFontDatabase>
 #include "./ui_mainwindow.h"
 #include <QHeaderView>
 #include <QItemSelectionModel>
@@ -50,7 +52,7 @@ MainWindow::MainWindow(QWidget *parent)
     m_searchEdit->setPlaceholderText(tr("Search..."));
     m_searchEdit->setClearButtonEnabled(true);
     funcGroupLayout->addWidget(m_searchEdit);
-    m_functionsTable = new QTableWidget();
+    m_functionsTable = new PatternFunctionsTable();
     m_functionsTable->setColumnCount(6);
     m_functionsTable->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_functionsTable->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -74,7 +76,8 @@ MainWindow::MainWindow(QWidget *parent)
     rulesLayout->setContentsMargins(0, 0, 0, 0);
     QGroupBox *rulesGroup = new QGroupBox(tr("Detection rules"));
     QVBoxLayout *rulesGroupLayout = new QVBoxLayout(rulesGroup);
-    m_rulesText = new QPlainTextEdit();
+    m_rulesText = new PatternRulesEdit();
+    m_rulesText->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
     m_rulesText->setReadOnly(true);
     m_rulesText->setPlaceholderText(tr("Select a function or module to view rules"));
     rulesGroupLayout->addWidget(m_rulesText);
@@ -151,7 +154,9 @@ void MainWindow::refreshFunctionsTable()
         setReadOnly(row, 2, new QTableWidgetItem(QString("0x%1").arg(e.function->offset, 0, 16)));
         setReadOnly(row, 3, new QTableWidgetItem(e.function->isLocal ? "Y" : ""));
         setReadOnly(row, 4, new QTableWidgetItem(e.function->isCollision ? "!" : ""));
-        setReadOnly(row, 5, new QTableWidgetItem(e.module->patternPathHex()));
+        auto *patternItem = new QTableWidgetItem(e.module->patternPathHex());
+        patternItem->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+        setReadOnly(row, 5, patternItem);
     }
     t->setSortingEnabled(true);
     applyTableFilter();
@@ -169,7 +174,13 @@ void MainWindow::applyTableFilter()
         bool match = false;
         for (int col = 0; col < t->columnCount(); ++col) {
             QTableWidgetItem *item = t->item(row, col);
-            if (item && item->text().contains(text, Qt::CaseInsensitive)) {
+            QString value = item ? item->text() : QString();
+            QString query = text;
+            if (col == 5) {
+                value.remove(QChar(' '));
+                query.remove(QChar(' '));
+            }
+            if (item && value.contains(query, Qt::CaseInsensitive)) {
                 match = true;
                 break;
             }
@@ -211,6 +222,9 @@ void MainWindow::refreshRulesForSelection()
     lines << "Pattern path: " + e.module->patternPathHex();
     lines << e.module->rulesSummary();
     m_rulesText->setPlainText(lines.join("\n\n"));
+    // Locate the actual pattern block even if a function name contains a newline.
+    const int patternBlock = lines[0].count('\n') + 2;
+    static_cast<PatternRulesEdit *>(m_rulesText)->setPatternBlock(patternBlock, QString("Pattern path: ").size());
 }
 
 void MainWindow::onFunctionSelectionChanged()

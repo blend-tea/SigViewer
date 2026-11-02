@@ -113,8 +113,11 @@ QString FlirtPatternNode::toHexString() const {
 QString FlirtModule::patternPathHex() const {
     QString out;
     for (const auto &n : patternPath) {
-        if (!out.isEmpty()) out += " ";
-        out += n.toHexString();
+        const QString hex = n.toHexString();
+        for (int i = 0; i < hex.size(); i += 2) {
+            if (!out.isEmpty()) out += ' ';
+            out += hex.mid(i, 2);
+        }
     }
     return out;
 }
